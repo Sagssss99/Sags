@@ -45,6 +45,7 @@ COMANDOS:
 ,help
 ,help next
 ,ping
+,checkuser nombre1 nombre2 (o adjunta un .txt)
 ,roles
 ,r @usuario @rol
 ,mod ban @usuario [razón]
