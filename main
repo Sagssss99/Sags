@@ -351,6 +351,39 @@ async def help_command(ctx, *, command_name: str | None = None):
 async def helpme(ctx, *, command_name: str | None = None):
     await help_command(ctx, command_name=command_name)
 
+import re as _re
+
+USERNAME_RE = _re.compile(r"^(?!.*\.\.)[a-z0-9_.]{2,32}$")
+
+
+@bot.command(name="checkuser", aliases=["usernames"])
+async def checkuser(ctx, *names: str):
+    """Valida el formato de nombres (o de un .txt adjunto) y revisa si ya existen en este servidor."""
+    candidates = list(names)
+    for attachment in ctx.message.attachments[:1]:
+        if attachment.size > 200_000:
+            return await ctx.send("El archivo es demasiado grande (máx. 200 KB).")
+        text = (await attachment.read()).decode("utf-8", errors="ignore")
+        candidates += text.split()
+    candidates = list(dict.fromkeys(n.strip().lower().lstrip("@") for n in candidates if n.strip()))[:1000]
+    if not candidates:
+        return await ctx.send("Uso: `,checkuser nombre1 nombre2` o adjunta un .txt con un nombre por línea.")
+    taken = set()
+    if ctx.guild:
+        taken = {m.name.lower() for m in ctx.guild.members}
+    valid = [n for n in candidates if USERNAME_RE.match(n) and n not in taken]
+    invalid = [n for n in candidates if not USERNAME_RE.match(n)]
+    in_use = [n for n in candidates if n in taken]
+    body = "Nombres válidos y libres en este servidor:\n" + ("\n".join(valid) if valid else "(ninguno)")
+    body += f"\n\nFormato inválido: {len(invalid)} | Ya en uso en el servidor: {len(in_use)}"
+    body += "\nNota: Discord no permite comprobar la disponibilidad global de forma oficial."
+    if len(body) > 1900:
+        import io
+        await ctx.send("Resultado adjunto.", file=discord.File(io.BytesIO(body.encode()), "disponibles.txt"))
+    else:
+        await ctx.send(body)
+
+
 @bot.command()
 async def ping(ctx):
     await ctx.send(f"Pong! `{round(ctx.bot.latency * 1000)} ms`")
