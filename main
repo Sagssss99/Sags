@@ -100,6 +100,7 @@ VOICE_CREATOR_CONFIG = os.path.join(os.path.dirname(__file__), "data", "voice_cr
 INSTANCE_LOCK_PATH = os.path.join(os.path.dirname(__file__), "data", "bot.lock")
 PROFILE_HISTORY_PATH = os.path.join(os.path.dirname(__file__), "data", "profile_history.json")
 ADMIN_ACCESS_CONFIG = os.path.join(os.path.dirname(__file__), "data", "admin_access.json")
+ANTINUKE_CONFIG = os.path.join(os.path.dirname(__file__), "data", "antinuke.json")
 
 
 def load_admin_access_config():
@@ -134,6 +135,75 @@ def save_admin_access_config():
 
 
 load_admin_access_config()
+
+
+def load_antinuke_config():
+    try:
+        with open(ANTINUKE_CONFIG, encoding="utf-8") as config_file:
+            config = json.load(config_file)
+    except FileNotFoundError:
+        return {}
+    except (OSError, json.JSONDecodeError) as error:
+        logger.error("No se pudo leer la configuración antinuke: %s", error)
+        raise
+
+    if not isinstance(config, dict):
+        raise ValueError("antinuke.json debe contener un objeto JSON.")
+
+    settings = {}
+    for guild_id, values in config.items():
+        if not isinstance(values, dict):
+            continue
+        try:
+            settings[int(guild_id)] = {
+                "enabled": bool(values.get("enabled", False)),
+                "threshold": max(2, min(10, int(values.get("threshold", 3)))),
+                "interval": max(5, min(60, int(values.get("interval", 10)))),
+                "whitelist": {int(user_id) for user_id in values.get("whitelist", [])},
+                "alert_channel_id": (
+                    int(values["alert_channel_id"])
+                    if values.get("alert_channel_id") is not None
+                    else None
+                ),
+            }
+        except (TypeError, ValueError):
+            logger.warning("Se ignoró configuración antinuke inválida para el servidor %s", guild_id)
+    return settings
+
+
+def save_antinuke_config():
+    os.makedirs(os.path.dirname(ANTINUKE_CONFIG), exist_ok=True)
+    config = {
+        str(guild_id): {
+            "enabled": values["enabled"],
+            "threshold": values["threshold"],
+            "interval": values["interval"],
+            "whitelist": sorted(values["whitelist"]),
+            "alert_channel_id": values["alert_channel_id"],
+        }
+        for guild_id, values in ANTINUKE_SETTINGS.items()
+    }
+    temp_path = f"{ANTINUKE_CONFIG}.tmp"
+    with open(temp_path, "w", encoding="utf-8") as config_file:
+        json.dump(config, config_file, indent=2)
+    os.replace(temp_path, ANTINUKE_CONFIG)
+
+
+ANTINUKE_SETTINGS = load_antinuke_config()
+ANTINUKE_ACTIONS = {}
+
+
+def antinuke_settings(guild_id):
+    return ANTINUKE_SETTINGS.setdefault(
+        guild_id,
+        {
+            "enabled": False,
+            "threshold": 3,
+            "interval": 10,
+            "whitelist": set(),
+            "alert_channel_id": None,
+        },
+    )
 
 
 def load_profile_history():
@@ -258,6 +328,292 @@ bot = commands.Bot(command_prefix=",", intents=intents, help_command=None)
 bot.voice_creators = VOICE_CREATORS
 bot.antinuke_whitelist = ADMIN_WHITELIST
 bot.root_admin_id = ROOT_ADMIN_ID
+
+
+def antinuke_embed(title, description, color=0x5865F2):
+    return discord.Embed(title=title, description=description, color=color)
+
+
+def antinuke_status_embed(guild):
+    settings = antinuke_settings(guild.id)
+    whitelist = settings["whitelist"]
+    embed = antinuke_embed(
+        "Antinuke — Estado",
+        "Protección activada." if settings["enabled"] else "Protección desactivada.",
+        0x57F287 if settings["enabled"] else 0xED4245,
+    )
+    embed.add_field(name="Estado", value="Activado" if settings["enabled"] else "Desactivado")
+    embed.add_field(
+        name="Límite",
+        value=f"{settings['threshold']} acciones / {settings['interval']} s",
+    )
+    embed.add_field(name="Whitelist", value=f"{len(whitelist)} usuarios")
+    alert_channel = guild.get_channel(settings["alert_channel_id"]) if settings["alert_channel_id"] else None
+    embed.add_field(
+        name="Canal de alertas",
+        value=alert_channel.mention if alert_channel else "No configurado",
+        inline=False,
+    )
+    return embed
+
+
+async def find_antinuke_actor(guild, audit_action, target_id, event_time):
+    for attempt in range(3):
+        try:
+            async for entry in guild.audit_logs(limit=8, action=audit_action):
+                age = event_time - entry.created_at
+                if age > timedelta(seconds=10):
+                    break
+                if age < timedelta(seconds=-5):
+                    continue
+                if getattr(entry.target, "id", None) == target_id:
+                    return entry.user_id
+        except (discord.Forbidden, discord.HTTPException):
+            logger.exception(
+                "No se pudo consultar el registro de auditoría antinuke en el servidor %s",
+                guild.id,
+            )
+            return None
+        if attempt < 2:
+            await asyncio.sleep(0.6)
+    return None
+
+
+async def process_antinuke_action(guild, target_id, action_name, audit_action, event_time=None):
+    settings = antinuke_settings(guild.id)
+    if not settings["enabled"]:
+        return
+
+    event_time = event_time or discord.utils.utcnow()
+    actor_id = await find_antinuke_actor(guild, audit_action, target_id, event_time)
+    if actor_id is None or actor_id == bot.user.id or actor_id == guild.owner_id:
+        return
+    if actor_id in ADMIN_WHITELIST or actor_id in settings["whitelist"]:
+        return
+
+    key = (guild.id, actor_id)
+    actions = ANTINUKE_ACTIONS.setdefault(key, [])
+    cutoff = event_time - timedelta(seconds=settings["interval"])
+    actions[:] = [timestamp for timestamp in actions if timestamp >= cutoff]
+    actions.append(event_time)
+    if len(actions) < settings["threshold"]:
+        return
+
+    actions.clear()
+    actor = guild.get_member(actor_id)
+    reason = (
+        f"Antinuke: {settings['threshold']} acciones destructivas en "
+        f"{settings['interval']} segundos."
+    )
+    kicked = False
+    failure = None
+    if not bot_has_permission(guild, "kick_members"):
+        failure = "No tengo el permiso Expulsar miembros."
+    else:
+        try:
+            if actor is None:
+                actor = await guild.fetch_member(actor_id)
+            await guild.kick(actor, reason=reason)
+            kicked = True
+        except discord.NotFound:
+            failure = "No pude encontrar al responsable en el servidor."
+        except (discord.Forbidden, discord.HTTPException) as error:
+            failure = "Discord rechazó la expulsión (permisos o jerarquía de roles)."
+            logger.warning("No se pudo expulsar a %s por antinuke: %s", actor_id, error)
+
+    result = "Responsable expulsado." if kicked else f"**No se pudo expulsar:** {failure}"
+    embed = antinuke_embed(
+        "Antinuke — Acción detectada",
+        f"Se detectaron **{settings['threshold']}** acciones destructivas en "
+        f"**{settings['interval']} segundos**.\n"
+        f"**Responsable:** <@{actor_id}> (`{actor_id}`)\n"
+        f"**Última acción:** {action_name}\n{result}",
+        0xED4245 if kicked else 0xFEE75C,
+    )
+    embed.timestamp = event_time
+    channel_id = settings["alert_channel_id"]
+    channel = guild.get_channel(channel_id) if channel_id else None
+    if channel is not None:
+        try:
+            await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+        except discord.HTTPException:
+            logger.exception("No se pudo enviar la alerta antinuke al canal %s", channel_id)
+    logger.warning(
+        "Antinuke detectó %s acciones de %s en el servidor %s; expulsado=%s",
+        settings["threshold"],
+        actor_id,
+        guild.id,
+        kicked,
+    )
+
+
+@bot.event
+async def on_guild_channel_delete(channel):
+    await process_antinuke_action(
+        channel.guild,
+        channel.id,
+        "Eliminación de canal",
+        discord.AuditLogAction.channel_delete,
+    )
+
+
+@bot.event
+async def on_guild_role_delete(role):
+    await process_antinuke_action(
+        role.guild,
+        role.id,
+        "Eliminación de rol",
+        discord.AuditLogAction.role_delete,
+    )
+
+
+@bot.event
+async def on_member_ban(guild, user):
+    await process_antinuke_action(
+        guild,
+        user.id,
+        "Baneo de miembro",
+        discord.AuditLogAction.ban,
+    )
+
+
+@bot.event
+async def on_member_remove(member):
+    await process_antinuke_action(
+        member.guild,
+        member.id,
+        "Expulsión de miembro",
+        discord.AuditLogAction.kick,
+    )
+
+
+@bot.group(name="antinuke", invoke_without_command=True)
+@commands.has_guild_permissions(manage_guild=True)
+async def antinuke(ctx, enabled: str = None):
+    settings = antinuke_settings(ctx.guild.id)
+    if enabled is None:
+        return await ctx.send(embed=antinuke_status_embed(ctx.guild))
+
+    normalized = enabled.lower()
+    if normalized not in {"true", "false", "on", "off", "activar", "desactivar"}:
+        return await ctx.send(
+            embed=antinuke_embed(
+                "Uso de antinuke",
+                "Usa `,antinuke true` o `,antinuke false`. "
+                "Consulta la configuración con `,antinuke`.",
+                0xFEE75C,
+            )
+        )
+
+    if normalized in {"true", "on", "activar"}:
+        missing_permissions = [
+            label
+            for permission, label in (
+                ("view_audit_log", "Ver registro de auditoría"),
+                ("kick_members", "Expulsar miembros"),
+            )
+            if not bot_has_permission(ctx.guild, permission)
+        ]
+        if missing_permissions:
+            return await ctx.send(
+                embed=antinuke_embed(
+                    "No se puede activar antinuke",
+                    "Necesito estos permisos: " + ", ".join(missing_permissions) + ".",
+                    0xED4245,
+                )
+            )
+
+    previous_state = settings["enabled"], settings["alert_channel_id"]
+    settings["enabled"] = normalized in {"true", "on", "activar"}
+    settings["alert_channel_id"] = ctx.channel.id
+    try:
+        save_antinuke_config()
+    except OSError as error:
+        settings["enabled"], settings["alert_channel_id"] = previous_state
+        logger.exception("No se pudo guardar la configuración antinuke")
+        return await ctx.send(
+            embed=antinuke_embed("Error de configuración", f"No se guardó el cambio: `{error}`", 0xED4245)
+        )
+
+    await ctx.send(embed=antinuke_status_embed(ctx.guild))
+
+
+@antinuke.command(name="threshold", help="Configura el límite de acciones y el intervalo en segundos.")
+@commands.has_guild_permissions(manage_guild=True)
+async def antinuke_threshold(ctx, count: int, seconds: int):
+    if not 2 <= count <= 10 or not 5 <= seconds <= 60:
+        return await ctx.send(
+            embed=antinuke_embed(
+                "Límite no válido",
+                "El límite debe estar entre **2 y 10 acciones** y el intervalo entre **5 y 60 segundos**.",
+                0xFEE75C,
+            )
+        )
+    settings = antinuke_settings(ctx.guild.id)
+    previous = settings["threshold"], settings["interval"]
+    settings["threshold"], settings["interval"] = count, seconds
+    try:
+        save_antinuke_config()
+    except OSError as error:
+        settings["threshold"], settings["interval"] = previous
+        logger.exception("No se pudo guardar el límite antinuke")
+        return await ctx.send(
+            embed=antinuke_embed("Error de configuración", f"No se guardó el cambio: `{error}`", 0xED4245)
+        )
+    await ctx.send(embed=antinuke_status_embed(ctx.guild))
+
+
+@antinuke.group(name="whitelist", invoke_without_command=True)
+@commands.has_guild_permissions(manage_guild=True)
+async def antinuke_whitelist(ctx):
+    settings = antinuke_settings(ctx.guild.id)
+    users = [f"<@{user_id}> (`{user_id}`)" for user_id in sorted(settings["whitelist"])]
+    embed = antinuke_embed(
+        "Antinuke — Whitelist",
+        "\n".join(users) if users else "No hay usuarios añadidos a la whitelist.",
+    )
+    embed.set_footer(text=f"{len(users)} usuarios")
+    await ctx.send(embed=embed)
+
+
+@antinuke_whitelist.command(name="add", help="Añade un miembro a la whitelist de antinuke.")
+@commands.has_guild_permissions(manage_guild=True)
+async def antinuke_whitelist_add(ctx, member: discord.Member):
+    settings = antinuke_settings(ctx.guild.id)
+    was_added = member.id in settings["whitelist"]
+    settings["whitelist"].add(member.id)
+    try:
+        save_antinuke_config()
+    except OSError as error:
+        if not was_added:
+            settings["whitelist"].discard(member.id)
+        logger.exception("No se pudo guardar la whitelist antinuke")
+        return await ctx.send(
+            embed=antinuke_embed("Error de configuración", f"No se guardó el cambio: `{error}`", 0xED4245)
+        )
+    await ctx.send(
+        embed=antinuke_embed("Antinuke — Whitelist", f"{member.mention} ya está en la whitelist.", 0x57F287)
+    )
+
+
+@antinuke_whitelist.command(name="remove", help="Quita un miembro de la whitelist de antinuke.")
+@commands.has_guild_permissions(manage_guild=True)
+async def antinuke_whitelist_remove(ctx, member: discord.Member):
+    settings = antinuke_settings(ctx.guild.id)
+    was_added = member.id in settings["whitelist"]
+    settings["whitelist"].discard(member.id)
+    try:
+        save_antinuke_config()
+    except OSError as error:
+        if was_added:
+            settings["whitelist"].add(member.id)
+        logger.exception("No se pudo guardar la whitelist antinuke")
+        return await ctx.send(
+            embed=antinuke_embed("Error de configuración", f"No se guardó el cambio: `{error}`", 0xED4245)
+        )
+    await ctx.send(
+        embed=antinuke_embed("Antinuke — Whitelist", f"{member.mention} se quitó de la whitelist.", 0x57F287)
+    )
 
 
 @bot.event

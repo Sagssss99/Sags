@@ -85,10 +85,18 @@ MODERACION Y SEGURIDAD:
   tener su rol por encima de los roles protegidos.
 - Configura los filtros con ,automod true, ,antispam true,
   ,antiinvite true, ,antilink true, ,antimention true y ,antibot true.
-- ,antinuke true activa la protección contra eliminaciones de canales/roles y
-  ráfagas de baneos/expulsiones. Tras 3 acciones destructivas en 10 segundos,
-  expulsa al responsable no autorizado. El propietario y la whitelist global
-  están exentos. El bot necesita Ver registro de auditoría y Expulsar miembros.
+- `,antinuke true|false` activa o desactiva la protección; `,antinuke` muestra
+  su estado y `,antinuke threshold <acciones> <segundos>` ajusta el límite
+  (2–10 acciones en 5–60 segundos).
+- `,antinuke whitelist` lista las excepciones; `,antinuke whitelist add @usuario`
+  y `,antinuke whitelist remove @usuario` las administran. Estos comandos
+  requieren Gestionar servidor. Las alertas se envían al canal donde se activó
+  antinuke y la configuración se guarda en `data/antinuke.json`.
+- Antinuke vigila eliminaciones de canales/roles y ráfagas de baneos/expulsiones.
+  Por defecto, tras 3 acciones destructivas en 10 segundos, intenta expulsar al
+  responsable no autorizado. El propietario y la whitelist global están exentos.
+  El bot necesita Ver registro de auditoría y Expulsar miembros; si no puede
+  completar la expulsión, informa el resultado en la alerta.
 - ,verification-setup <rol> [canal] configura el rol y el canal de verificación.
 - ,security muestra el estado de los filtros.
 
