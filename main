@@ -523,13 +523,13 @@ async def antinuke(ctx, enabled: str = None):
                 )
             )
 
-    was_enabled = settings["enabled"]
+    previous_state = settings["enabled"], settings["alert_channel_id"]
     settings["enabled"] = normalized in {"true", "on", "activar"}
     settings["alert_channel_id"] = ctx.channel.id
     try:
         save_antinuke_config()
     except OSError as error:
-        settings["enabled"] = was_enabled
+        settings["enabled"], settings["alert_channel_id"] = previous_state
         logger.exception("No se pudo guardar la configuración antinuke")
         return await ctx.send(
             embed=antinuke_embed("Error de configuración", f"No se guardó el cambio: `{error}`", 0xED4245)

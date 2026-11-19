@@ -95,8 +95,8 @@ MODERACION Y SEGURIDAD:
 - Antinuke vigila eliminaciones de canales/roles y ráfagas de baneos/expulsiones.
   Por defecto, tras 3 acciones destructivas en 10 segundos, intenta expulsar al
   responsable no autorizado. El propietario y la whitelist global están exentos.
-  El bot necesita Ver registro de auditoría y Expulsar miembros; si Discord no
-  permite identificar o expulsar al responsable, informa el resultado en la alerta.
+  El bot necesita Ver registro de auditoría y Expulsar miembros; si no puede
+  completar la expulsión, informa el resultado en la alerta.
 - ,verification-setup <rol> [canal] configura el rol y el canal de verificación.
 - ,security muestra el estado de los filtros.
 
